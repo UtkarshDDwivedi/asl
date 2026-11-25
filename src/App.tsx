@@ -1,4 +1,4 @@
-import React, { useState, useRef, useCallback } from 'react';
+import React, { useState, useRef, useCallback, useEffect } from 'react';
 import { Navbar } from './components/Navbar';
 import { CameraView } from './components/CameraView';
 import { TranslationPanel } from './components/TranslationPanel';
@@ -22,6 +22,7 @@ export const App: React.FC = () => {
   const [sentence, setSentence] = useState<string>('');
   const [ttsEnabled, setTtsEnabled] = useState<boolean>(true);
   const [holdDuration, setHoldDuration] = useState<number>(500);
+  const [wordConfidenceThreshold, setWordConfidenceThreshold] = useState<number>(0.25);
 
   // MediaPipe & System state
   const [fps, setFps] = useState<number>(0);
@@ -30,6 +31,7 @@ export const App: React.FC = () => {
   const [wordLabels, setWordLabels] = useState<SignLabel[]>([]);
   const [currentDetectedSign, setCurrentDetectedSign] = useState<RecognitionResult | null>(null);
   const [latestWordPrediction, setLatestWordPrediction] = useState<WordPredictionEvent | null>(null);
+  const [wordDiscardNotice, setWordDiscardNotice] = useState<string | null>(null);
 
   // Gesture stabilization / hold logic (Fingerspelling mode)
   const [holdProgress, setHoldProgress] = useState<number>(0);
@@ -37,13 +39,21 @@ export const App: React.FC = () => {
 
   const holdSignRef = useRef<string | null>(null);
   const holdStartTimeRef = useRef<number | null>(null);
+  const lastValidSignTimeRef = useRef<number>(0);
   const lastCommittedTimeRef = useRef<number>(0);
+  const discardTimerRef = useRef<number | null>(null);
 
   // Modals
   const [isGuideOpen, setIsGuideOpen] = useState<boolean>(false);
   const [isPracticeOpen, setIsPracticeOpen] = useState<boolean>(false);
   const [practiceTargetOverride, setPracticeTargetOverride] = useState<string | null>(null);
   const [practiceCategoryOverride, setPracticeCategoryOverride] = useState<string | null>(null);
+
+  useEffect(() => {
+    return () => {
+      if (discardTimerRef.current) window.clearTimeout(discardTimerRef.current);
+    };
+  }, []);
 
   const handleModeChange = useCallback((nextMode: RecognitionMode) => {
     setMode(nextMode);
@@ -53,6 +63,7 @@ export const App: React.FC = () => {
     setHoldProgress(0);
     setCurrentDetectedSign(null);
     setLatestWordPrediction(null);
+    setWordDiscardNotice(null);
   }, []);
 
   // Commit a letter or complete sign to the word/sentence (Fingerspelling mode)
@@ -92,12 +103,16 @@ export const App: React.FC = () => {
     [ttsEnabled],
   );
 
-  // Handle live sign stream in Fingerspelling mode
+  // Handle live sign stream in Fingerspelling mode with 200ms flicker grace window
   const handleSignDetected = useCallback(
     (result: RecognitionResult) => {
       setCurrentDetectedSign(result);
+      const now = performance.now();
 
       if (result.sign === '...' || result.confidence < 0.75) {
+        if (holdSignRef.current && now - lastValidSignTimeRef.current < 200) {
+          return;
+        }
         holdSignRef.current = null;
         holdStartTimeRef.current = null;
         setHoldingSign(null);
@@ -105,7 +120,7 @@ export const App: React.FC = () => {
         return;
       }
 
-      const now = performance.now();
+      lastValidSignTimeRef.current = now;
 
       if (holdSignRef.current !== result.sign) {
         holdSignRef.current = result.sign;
@@ -130,6 +145,24 @@ export const App: React.FC = () => {
   // Handle 250-Word ASL recognition events
   const handleWordPrediction = useCallback(
     (event: WordPredictionEvent) => {
+      if (discardTimerRef.current) {
+        window.clearTimeout(discardTimerRef.current);
+        discardTimerRef.current = null;
+      }
+
+      if (event.kind === 'discarded') {
+        const message =
+          event.discardReason === 'hands-leaving'
+            ? 'Hands moved out of view too quickly — pause briefly in frame after signing.'
+            : 'Sign was too brief to classify — try a slightly fuller or slower motion.';
+        setWordDiscardNotice(message);
+        discardTimerRef.current = window.setTimeout(() => {
+          setWordDiscardNotice(null);
+        }, 3000);
+        return;
+      }
+
+      setWordDiscardNotice(null);
       setLatestWordPrediction(event);
       if (event.kind === 'recognized' && event.top[0] && !isPracticeOpen) {
         const word = event.top[0].label.toUpperCase();
@@ -187,6 +220,7 @@ export const App: React.FC = () => {
     setCurrentWord('');
     setSentence('');
     setLatestWordPrediction(null);
+    setWordDiscardNotice(null);
   };
 
   const handleSelectSuggestion = (word: string) => {
@@ -232,6 +266,8 @@ export const App: React.FC = () => {
               currentHoldingSign={holdingSign}
               wordPipelineStatus={wordPipelineStatus}
               latestWordPrediction={latestWordPrediction}
+              wordDiscardNotice={wordDiscardNotice}
+              wordConfidenceThreshold={wordConfidenceThreshold}
             />
           </div>
 
@@ -247,9 +283,12 @@ export const App: React.FC = () => {
               onSelectSuggestion={handleSelectSuggestion}
               onSelectWordCandidate={handleSelectWordCandidate}
               latestWordPrediction={latestWordPrediction}
+              wordDiscardNotice={wordDiscardNotice}
               ttsEnabled={ttsEnabled}
               holdDuration={holdDuration}
               onHoldDurationChange={setHoldDuration}
+              wordConfidenceThreshold={wordConfidenceThreshold}
+              onWordConfidenceThresholdChange={setWordConfidenceThreshold}
             />
           </div>
         </div>

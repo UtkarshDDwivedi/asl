@@ -21,7 +21,8 @@ export interface WordRecognitionResult {
 export type RecognizerEvent =
   | { type: 'status'; status: FrameStatus }
   | { type: 'signing' }
-  | { type: 'discarded' }
+  | { type: 'classifying' }
+  | { type: 'discarded'; reason: 'too-short' | 'hands-leaving' }
   | { type: 'result'; result: WordRecognitionResult }
   | { type: 'error'; message: string };
 
@@ -36,13 +37,21 @@ export class Recognizer {
   private statuses: FrameStatus[] = [];
   private lastStatus: FrameStatus | null = null;
   private generation = 0;
+  private minConfidence: number | undefined;
 
   constructor(
     private readonly meta: ModelMeta,
     private readonly labels: readonly SignLabel[],
     private readonly infer: Infer,
     private readonly emit: (event: RecognizerEvent) => void,
-  ) {}
+    minConfidence?: number,
+  ) {
+    this.minConfidence = minConfidence;
+  }
+
+  setMinConfidence(value: number | undefined): void {
+    this.minConfidence = value;
+  }
 
   get shipped(): boolean[] {
     return this.labels.map((l) => l.shipped);
@@ -80,25 +89,31 @@ export class Recognizer {
     const statuses = this.statuses;
     this.statuses = [];
     if (event.type === 'discard') {
-      this.emit({ type: 'discarded' });
+      this.emit({ type: 'discarded', reason: event.reason });
       return;
     }
     const partialFrames = statuses.filter((s) => s === 'partial').length;
     const framedFrames = partialFrames + statuses.filter((s) => s === 'ok').length;
     const partial = partialFrames > framedFrames / 2;
+    this.emit({ type: 'classifying' });
     void this.classify(event.segment, partial, this.generation);
   }
 
   private async classify(segment: Segment, partial: boolean, generation: number): Promise<void> {
     const input = modelInput(segment.frames, segment.fps, this.meta);
     if (input.frames < this.meta.minFrames) {
-      this.emit({ type: 'discarded' });
+      this.emit({ type: 'discarded', reason: 'too-short' });
       return;
     }
     try {
       const inference = await this.infer(input);
       if (generation !== this.generation) return;
-      const decision = decide(inference.logits, this.shipped, this.meta.calibration, { partial });
+      const decision = decide(
+        inference.logits,
+        this.shipped,
+        this.meta.calibration,
+        { partial, minConfidence: this.minConfidence },
+      );
       this.emit({ type: 'result', result: { decision, inference, segment, partial } });
     } catch (error) {
       this.emit({ type: 'error', message: error instanceof Error ? error.message : String(error) });

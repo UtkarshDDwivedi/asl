@@ -10,6 +10,7 @@ import {
   Space,
   CheckCircle2,
   AlertCircle,
+  Info,
 } from 'lucide-react';
 import { sounds } from '../utils/audio';
 import { getWordSuggestions } from '../utils/words';
@@ -25,9 +26,12 @@ interface TranslationPanelProps {
   onSelectSuggestion: (word: string) => void;
   onSelectWordCandidate: (word: string, replaceLast: boolean) => void;
   latestWordPrediction: WordPredictionEvent | null;
+  wordDiscardNotice: string | null;
   ttsEnabled: boolean;
   holdDuration: number;
   onHoldDurationChange: (val: number) => void;
+  wordConfidenceThreshold: number;
+  onWordConfidenceThresholdChange: (val: number) => void;
 }
 
 export const TranslationPanel: React.FC<TranslationPanelProps> = ({
@@ -40,8 +44,11 @@ export const TranslationPanel: React.FC<TranslationPanelProps> = ({
   onSelectSuggestion,
   onSelectWordCandidate,
   latestWordPrediction,
+  wordDiscardNotice,
   holdDuration,
   onHoldDurationChange,
+  wordConfidenceThreshold,
+  onWordConfidenceThresholdChange,
 }) => {
   const [copied, setCopied] = useState(false);
   const [showSettings, setShowSettings] = useState(false);
@@ -77,46 +84,74 @@ export const TranslationPanel: React.FC<TranslationPanelProps> = ({
           </h2>
         </div>
 
-        {mode === 'fingerspell' ? (
-          <button
-            onClick={() => setShowSettings(!showSettings)}
-            className={`p-2 rounded-xl border text-xs transition-all flex items-center gap-1.5 ${
-              showSettings
-                ? 'bg-indigo-600/20 text-indigo-400 border-indigo-500/30'
-                : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-slate-200'
-            }`}
-          >
-            <Sliders className="w-3.5 h-3.5" />
-            <span className="hidden sm:inline">Settings</span>
-          </button>
-        ) : (
-          <span className="text-[11px] font-mono text-cyan-400 bg-cyan-500/10 border border-cyan-500/20 px-2.5 py-1 rounded-full">
-            250-Word AI
-          </span>
-        )}
+        <button
+          onClick={() => setShowSettings(!showSettings)}
+          className={`p-2 rounded-xl border text-xs transition-all flex items-center gap-1.5 ${
+            showSettings
+              ? 'bg-indigo-600/20 text-indigo-400 border-indigo-500/30'
+              : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-slate-200'
+          }`}
+        >
+          <Sliders className="w-3.5 h-3.5" />
+          <span className="hidden sm:inline">Settings</span>
+        </button>
       </div>
 
-      {/* Settings collapsible box (fingerspelling) */}
-      {mode === 'fingerspell' && showSettings && (
+      {/* Settings collapsible box */}
+      {showSettings && (
         <div className="bg-slate-950/80 rounded-2xl p-4 border border-slate-800 text-xs space-y-3 animate-in fade-in slide-in-from-top-2">
-          <div className="flex items-center justify-between">
-            <span className="text-slate-300 font-medium">Hold Sensitivity ({holdDuration}ms)</span>
-            <span className="text-indigo-400 font-mono text-[11px]">
-              {holdDuration < 450 ? 'Fast' : holdDuration > 700 ? 'Relaxed' : 'Balanced'}
-            </span>
-          </div>
-          <input
-            type="range"
-            min={300}
-            max={1000}
-            step={50}
-            value={holdDuration}
-            onChange={(e) => onHoldDurationChange(Number(e.target.value))}
-            className="w-full accent-indigo-500 cursor-pointer h-1.5 bg-slate-800 rounded-lg"
-          />
-          <p className="text-[11px] text-slate-500">
-            Hold a sign steady for this duration to confirm and type each letter.
-          </p>
+          {mode === 'fingerspell' ? (
+            <>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-300 font-medium">
+                  Hold Sensitivity ({holdDuration}ms)
+                </span>
+                <span className="text-indigo-400 font-mono text-[11px]">
+                  {holdDuration < 450 ? 'Fast' : holdDuration > 700 ? 'Relaxed' : 'Balanced'}
+                </span>
+              </div>
+              <input
+                type="range"
+                min={300}
+                max={1000}
+                step={50}
+                value={holdDuration}
+                onChange={(e) => onHoldDurationChange(Number(e.target.value))}
+                className="w-full accent-indigo-500 cursor-pointer h-1.5 bg-slate-800 rounded-lg"
+              />
+              <p className="text-[11px] text-slate-500">
+                Hold a hand pose steady for this duration to confirm each letter.
+              </p>
+            </>
+          ) : (
+            <>
+              <div className="flex items-center justify-between">
+                <span className="text-slate-300 font-medium">
+                  Auto-Commit Confidence ({Math.round(wordConfidenceThreshold * 100)}%)
+                </span>
+                <span className="text-cyan-400 font-mono text-[11px]">
+                  {wordConfidenceThreshold <= 0.2
+                    ? 'Permissive'
+                    : wordConfidenceThreshold >= 0.4
+                      ? 'Strict'
+                      : 'Balanced'}
+                </span>
+              </div>
+              <input
+                type="range"
+                min={0.15}
+                max={0.6}
+                step={0.05}
+                value={wordConfidenceThreshold}
+                onChange={(e) => onWordConfidenceThresholdChange(Number(e.target.value))}
+                className="w-full accent-cyan-500 cursor-pointer h-1.5 bg-slate-800 rounded-lg"
+              />
+              <p className="text-[11px] text-slate-500">
+                Predictions at or above this confidence are added automatically. Lower this if signs
+                only show in Top Predictions instead of typing into the box.
+              </p>
+            </>
+          )}
         </div>
       )}
 
@@ -149,35 +184,43 @@ export const TranslationPanel: React.FC<TranslationPanelProps> = ({
         </div>
       </div>
 
+      {/* Discard Diagnostic Notice */}
+      {mode === 'asl-words' && wordDiscardNotice && (
+        <div className="flex items-center gap-2 px-3 py-2 rounded-xl bg-indigo-950/50 border border-indigo-500/30 text-[11px] text-indigo-200">
+          <Info className="w-3.5 h-3.5 text-indigo-400 shrink-0" />
+          <span>{wordDiscardNotice}</span>
+        </div>
+      )}
+
       {/* 250-Word ASL Top-3 Candidates */}
-      {mode === 'asl-words' && latestWordPrediction && latestWordPrediction.kind !== 'discarded' && (
+      {mode === 'asl-words' && wordCandidates.length > 0 && (
         <div className="space-y-2">
           <div className="flex items-center justify-between text-[11px]">
             <div className="flex items-center gap-1.5 text-slate-400">
-              {latestWordPrediction.kind === 'recognized' ? (
+              {latestWordPrediction?.kind === 'recognized' ? (
                 <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
               ) : (
                 <AlertCircle className="w-3.5 h-3.5 text-amber-400" />
               )}
               <span>
-                {latestWordPrediction.kind === 'recognized'
-                  ? 'Top Predictions (click to replace):'
-                  : latestWordPrediction.reason === 'partial'
-                    ? 'Shoulders out of frame — tap if one matches:'
-                    : 'Low confidence — tap if one matches:'}
+                {latestWordPrediction?.kind === 'recognized'
+                  ? 'Top Predictions (tap to replace last):'
+                  : latestWordPrediction?.reason === 'partial'
+                    ? 'Shoulders clipped & low confidence — tap to add:'
+                    : 'Below threshold — tap a guess to add:'}
               </span>
             </div>
           </div>
 
           <div className="flex flex-wrap gap-2">
             {wordCandidates.map((cand, idx) => {
-              const replaceLast = latestWordPrediction.kind === 'recognized' && Boolean(sentence);
+              const replaceLast = latestWordPrediction?.kind === 'recognized' && Boolean(sentence);
               return (
                 <button
                   key={`${cand.index}-${cand.label}`}
                   onClick={() => onSelectWordCandidate(cand.label.toUpperCase(), replaceLast)}
                   className={`px-3 py-1.5 rounded-xl border text-xs font-semibold tracking-wide transition-all flex items-center gap-1.5 ${
-                    idx === 0 && latestWordPrediction.kind === 'recognized'
+                    idx === 0 && latestWordPrediction?.kind === 'recognized'
                       ? 'bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border-emerald-500/30'
                       : 'bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 border-indigo-500/30'
                   }`}

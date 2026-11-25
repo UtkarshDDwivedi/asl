@@ -31,6 +31,7 @@ export interface WordPredictionEvent {
   top: WordGuess[];
   logits?: Float32Array;
   reason?: 'low-confidence' | 'partial';
+  discardReason?: 'too-short' | 'hands-leaving';
   inferenceMs?: number;
   durationMs?: number;
 }

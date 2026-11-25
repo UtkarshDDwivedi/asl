@@ -24,12 +24,12 @@ export interface SegmenterOptions {
 }
 
 export const DEFAULT_SEGMENTER: SegmenterOptions = {
-  gapMs: 300,
-  moveSpeed: 0.6,
-  minFrames: 8,
+  gapMs: 320,
+  moveSpeed: 0.38,
+  minFrames: 4,
   maxMs: 4000,
-  prerollMs: 200,
-  leaveMs: 500,
+  prerollMs: 220,
+  leaveMs: 250,
 };
 
 export interface Segment {

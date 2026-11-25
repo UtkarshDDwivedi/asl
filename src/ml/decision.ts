@@ -46,7 +46,7 @@ export function decide(
   logits: ArrayLike<number>,
   shipped: readonly boolean[],
   calibration: Calibration,
-  quality: { partial?: boolean } = {},
+  quality: { partial?: boolean; minConfidence?: number } = {},
   k = 3,
 ): Decision {
   if (!shipped.some(Boolean)) return { kind: 'nothing', top: [] };
@@ -58,9 +58,13 @@ export function decide(
     .filter((g) => shipped[g.index])
     .sort((a, b) => b.probability - a.probability)
     .slice(0, k);
-  if (quality.partial) return { kind: 'not-sure', top, reason: 'partial' };
   const best = top[0]?.probability ?? 0;
-  if (best < calibration.notSureBelow) return { kind: 'not-sure', top, reason: 'low-confidence' };
+  const threshold = quality.minConfidence ?? calibration.notSureBelow;
+  // Only reject partial-shoulder frames if confidence is not strongly above threshold
+  if (quality.partial && best < Math.max(threshold, 0.42)) {
+    return { kind: 'not-sure', top, reason: 'partial' };
+  }
+  if (best < threshold) return { kind: 'not-sure', top, reason: 'low-confidence' };
   return { kind: 'sign', top };
 }
 

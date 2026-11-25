@@ -19,6 +19,7 @@ export interface AslWordsCallbacks {
   onError: (message: string) => void;
   onFramingStatus: (status: FramingStatus) => void;
   onSigningStart: () => void;
+  onClassifying: () => void;
   onPrediction: (event: WordPredictionEvent) => void;
   onFrameLandmarks: (frame: Frame, trackerMs: number) => void;
 }
@@ -33,9 +34,15 @@ export class AslWordsEngine {
   private meta: ModelMeta | null = null;
   private labels: SignLabel[] = [];
   private disposed = false;
+  private minConfidence: number | undefined;
 
-  async start(video: HTMLVideoElement, callbacks: AslWordsCallbacks): Promise<void> {
+  async start(
+    video: HTMLVideoElement,
+    callbacks: AslWordsCallbacks,
+    minConfidence?: number,
+  ): Promise<void> {
     this.disposed = false;
+    this.minConfidence = minConfidence;
     try {
       const loaded = await ModelClient.load();
       if (this.disposed) {
@@ -59,6 +66,7 @@ export class AslWordsEngine {
         loaded.labels,
         (input) => loaded.client.infer(input),
         (event: RecognizerEvent) => this.handleRecognizerEvent(event, callbacks),
+        this.minConfidence,
       );
 
       callbacks.onReady(loaded.meta, loaded.labels, tracker.delegate);
@@ -73,6 +81,11 @@ export class AslWordsEngine {
         callbacks.onError(err instanceof Error ? err.message : String(err));
       }
     }
+  }
+
+  setMinConfidence(value: number | undefined): void {
+    this.minConfidence = value;
+    this.recognizer?.setMinConfidence(value);
   }
 
   resetSegmenter(): void {
@@ -110,8 +123,15 @@ export class AslWordsEngine {
       case 'signing':
         callbacks.onSigningStart();
         break;
+      case 'classifying':
+        callbacks.onClassifying();
+        break;
       case 'discarded':
-        callbacks.onPrediction({ kind: 'discarded', top: [] });
+        callbacks.onPrediction({
+          kind: 'discarded',
+          top: [],
+          discardReason: event.reason,
+        });
         break;
       case 'error':
         callbacks.onError(event.message);
