@@ -4,22 +4,34 @@ import { CameraView } from './components/CameraView';
 import { TranslationPanel } from './components/TranslationPanel';
 import { SignGuideModal } from './components/SignGuideModal';
 import { PracticeMode } from './components/PracticeMode';
-import { RecognitionResult } from './types';
+import {
+  RecognitionMode,
+  RecognitionResult,
+  WordPipelineStatus,
+  WordPredictionEvent,
+} from './types';
+import type { SignLabel } from './ml/meta';
 import { sounds } from './utils/audio';
 
 export const App: React.FC = () => {
+  // Recognition mode: Fingerspelling (A-Z) vs 250-Word ASL AI
+  const [mode, setMode] = useState<RecognitionMode>('asl-words');
+
   // Translation state
   const [currentWord, setCurrentWord] = useState<string>('');
   const [sentence, setSentence] = useState<string>('');
   const [ttsEnabled, setTtsEnabled] = useState<boolean>(true);
-  const [holdDuration, setHoldDuration] = useState<number>(500); // 500ms default
+  const [holdDuration, setHoldDuration] = useState<number>(500);
 
   // MediaPipe & System state
   const [fps, setFps] = useState<number>(0);
   const [modelReady, setModelReady] = useState<boolean>(false);
+  const [wordPipelineStatus, setWordPipelineStatus] = useState<WordPipelineStatus>('loading');
+  const [wordLabels, setWordLabels] = useState<SignLabel[]>([]);
   const [currentDetectedSign, setCurrentDetectedSign] = useState<RecognitionResult | null>(null);
+  const [latestWordPrediction, setLatestWordPrediction] = useState<WordPredictionEvent | null>(null);
 
-  // Gesture stabilization / hold logic
+  // Gesture stabilization / hold logic (Fingerspelling mode)
   const [holdProgress, setHoldProgress] = useState<number>(0);
   const [holdingSign, setHoldingSign] = useState<string | null>(null);
 
@@ -31,18 +43,27 @@ export const App: React.FC = () => {
   const [isGuideOpen, setIsGuideOpen] = useState<boolean>(false);
   const [isPracticeOpen, setIsPracticeOpen] = useState<boolean>(false);
   const [practiceTargetOverride, setPracticeTargetOverride] = useState<string | null>(null);
+  const [practiceCategoryOverride, setPracticeCategoryOverride] = useState<string | null>(null);
 
-  // Commit a letter or complete sign to the word/sentence
+  const handleModeChange = useCallback((nextMode: RecognitionMode) => {
+    setMode(nextMode);
+    holdSignRef.current = null;
+    holdStartTimeRef.current = null;
+    setHoldingSign(null);
+    setHoldProgress(0);
+    setCurrentDetectedSign(null);
+    setLatestWordPrediction(null);
+  }, []);
+
+  // Commit a letter or complete sign to the word/sentence (Fingerspelling mode)
   const commitSign = useCallback(
     (signResult: RecognitionResult) => {
       const now = performance.now();
-      // Debounce minimum repeat time (700ms cooldown)
       if (now - lastCommittedTimeRef.current < 700) return;
       lastCommittedTimeRef.current = now;
 
       const rawSign = signResult.sign;
 
-      // Handle gestures vs single letters
       if (rawSign.startsWith('ILY')) {
         setSentence((prev) => (prev ? prev + ' I LOVE YOU' : 'I LOVE YOU'));
         sounds.playWordComplete();
@@ -64,15 +85,14 @@ export const App: React.FC = () => {
         sounds.playWordComplete();
         if (ttsEnabled) sounds.speakText('OK');
       } else if (signResult.type === 'letter' && rawSign.length === 1 && rawSign !== '?') {
-        // Append letter to current word
         setCurrentWord((prev) => prev + rawSign);
         sounds.playLetterCommit();
       }
     },
-    [ttsEnabled]
+    [ttsEnabled],
   );
 
-  // Handle live sign stream from CameraView
+  // Handle live sign stream in Fingerspelling mode
   const handleSignDetected = useCallback(
     (result: RecognitionResult) => {
       setCurrentDetectedSign(result);
@@ -88,29 +108,56 @@ export const App: React.FC = () => {
       const now = performance.now();
 
       if (holdSignRef.current !== result.sign) {
-        // User changed gesture
         holdSignRef.current = result.sign;
         holdStartTimeRef.current = now;
         setHoldingSign(result.sign);
         setHoldProgress(0);
       } else if (holdStartTimeRef.current) {
-        // Holding same gesture
         const elapsed = now - holdStartTimeRef.current;
         const progress = Math.min(elapsed / holdDuration, 1);
         setHoldProgress(progress);
 
         if (progress >= 1) {
           commitSign(result);
-          // Reset progress after committing
-          holdStartTimeRef.current = now + 400; // brief pause before re-triggering same sign
+          holdStartTimeRef.current = now + 400;
           setHoldProgress(0);
         }
       }
     },
-    [holdDuration, commitSign]
+    [holdDuration, commitSign],
   );
 
-  // Add space between words
+  // Handle 250-Word ASL recognition events
+  const handleWordPrediction = useCallback(
+    (event: WordPredictionEvent) => {
+      setLatestWordPrediction(event);
+      if (event.kind === 'recognized' && event.top[0] && !isPracticeOpen) {
+        const word = event.top[0].label.toUpperCase();
+        setSentence((prev) => (prev ? `${prev} ${word}` : word));
+        sounds.playWordComplete();
+        if (ttsEnabled) sounds.speakText(event.top[0].label);
+      }
+    },
+    [ttsEnabled, isPracticeOpen],
+  );
+
+  // Tap a top-3 word candidate to insert or replace the last recognized word
+  const handleSelectWordCandidate = useCallback(
+    (word: string, replaceLast: boolean) => {
+      setSentence((prev) => {
+        const parts = prev.trim() ? prev.trim().split(/\s+/) : [];
+        if (replaceLast && parts.length > 0) {
+          parts[parts.length - 1] = word;
+          return parts.join(' ');
+        }
+        return parts.length > 0 ? `${parts.join(' ')} ${word}` : word;
+      });
+      sounds.playWordComplete();
+      if (ttsEnabled) sounds.speakText(word.toLowerCase());
+    },
+    [ttsEnabled],
+  );
+
   const handleAddSpace = () => {
     if (currentWord) {
       if (ttsEnabled) sounds.speakText(currentWord.toLowerCase());
@@ -122,22 +169,26 @@ export const App: React.FC = () => {
     }
   };
 
-  // Backspace last letter
   const handleBackspace = () => {
     if (currentWord.length > 0) {
       setCurrentWord((prev) => prev.slice(0, -1));
     } else if (sentence.length > 0) {
-      setSentence((prev) => prev.slice(0, -1).trimEnd());
+      if (mode === 'asl-words') {
+        const words = sentence.trim().split(/\s+/);
+        words.pop();
+        setSentence(words.join(' '));
+      } else {
+        setSentence((prev) => prev.slice(0, -1).trimEnd());
+      }
     }
   };
 
-  // Clear all
   const handleClear = () => {
     setCurrentWord('');
     setSentence('');
+    setLatestWordPrediction(null);
   };
 
-  // Word suggestion selected
   const handleSelectSuggestion = (word: string) => {
     if (ttsEnabled) sounds.speakText(word.toLowerCase());
     sounds.playWordComplete();
@@ -149,15 +200,19 @@ export const App: React.FC = () => {
     <div className="min-h-screen bg-slate-950 flex flex-col font-sans">
       {/* Top Navbar */}
       <Navbar
+        mode={mode}
+        onModeChange={handleModeChange}
         ttsEnabled={ttsEnabled}
         onToggleTts={() => setTtsEnabled(!ttsEnabled)}
         onOpenGuide={() => setIsGuideOpen(true)}
         onOpenPractice={() => {
           setPracticeTargetOverride(null);
+          setPracticeCategoryOverride(null);
           setIsPracticeOpen(true);
         }}
         fps={fps}
         modelReady={modelReady}
+        wordPipelineStatus={wordPipelineStatus}
       />
 
       {/* Main Content Layout */}
@@ -166,23 +221,32 @@ export const App: React.FC = () => {
           {/* Left/Main Column: Real-Time Camera with Mesh & Overlay */}
           <div className="lg:col-span-7 xl:col-span-8 flex flex-col min-h-[420px] sm:min-h-[500px]">
             <CameraView
+              mode={mode}
               onSignDetected={handleSignDetected}
+              onWordPrediction={handleWordPrediction}
+              onWordPipelineStatus={setWordPipelineStatus}
+              onWordLabelsLoaded={setWordLabels}
               onFpsUpdate={setFps}
               onModelLoaded={setModelReady}
               holdProgress={holdProgress}
               currentHoldingSign={holdingSign}
+              wordPipelineStatus={wordPipelineStatus}
+              latestWordPrediction={latestWordPrediction}
             />
           </div>
 
           {/* Right Column: Live Translation Panel */}
           <div className="lg:col-span-5 xl:col-span-4 flex flex-col">
             <TranslationPanel
+              mode={mode}
               currentWord={currentWord}
               sentence={sentence}
               onAddSpace={handleAddSpace}
               onBackspace={handleBackspace}
               onClear={handleClear}
               onSelectSuggestion={handleSelectSuggestion}
+              onSelectWordCandidate={handleSelectWordCandidate}
+              latestWordPrediction={latestWordPrediction}
               ttsEnabled={ttsEnabled}
               holdDuration={holdDuration}
               onHoldDurationChange={setHoldDuration}
@@ -195,7 +259,17 @@ export const App: React.FC = () => {
           <div className="flex items-center gap-2">
             <span className="w-2 h-2 rounded-full bg-cyan-400" />
             <span>
-              <strong className="text-slate-200">How to use:</strong> Hold your hand steady in front of the camera. The app tracks your 21 hand joints at 60 FPS and types letters into words.
+              {mode === 'asl-words' ? (
+                <>
+                  <strong className="text-slate-200">250-Word ASL Mode:</strong> Keep both shoulders
+                  and hands in frame, perform a sign naturally, and pause briefly when finished.
+                </>
+              ) : (
+                <>
+                  <strong className="text-slate-200">Fingerspelling Mode:</strong> Hold your hand
+                  steady in front of the camera to type letters into words.
+                </>
+              )}
             </span>
           </div>
 
@@ -204,11 +278,15 @@ export const App: React.FC = () => {
               onClick={() => setIsGuideOpen(true)}
               className="text-cyan-400 hover:text-cyan-300 font-semibold underline underline-offset-4"
             >
-              View Sign Alphabet Chart
+              View 250-Word &amp; Alphabet Guide
             </button>
             <span className="text-slate-600">|</span>
             <button
-              onClick={() => setIsPracticeOpen(true)}
+              onClick={() => {
+                setPracticeTargetOverride(null);
+                setPracticeCategoryOverride(null);
+                setIsPracticeOpen(true);
+              }}
               className="text-indigo-400 hover:text-indigo-300 font-semibold underline underline-offset-4"
             >
               Start Practice Trainer
@@ -221,8 +299,11 @@ export const App: React.FC = () => {
       <SignGuideModal
         isOpen={isGuideOpen}
         onClose={() => setIsGuideOpen(false)}
-        onSelectForPractice={(symbol) => {
+        activeMode={mode}
+        wordLabels={wordLabels}
+        onSelectForPractice={(symbol, category) => {
           setPracticeTargetOverride(symbol);
+          setPracticeCategoryOverride(category);
           setIsPracticeOpen(true);
         }}
       />
@@ -231,12 +312,17 @@ export const App: React.FC = () => {
       <PracticeMode
         isOpen={isPracticeOpen}
         onClose={() => setIsPracticeOpen(false)}
+        activeMode={mode}
+        onRequestModeChange={handleModeChange}
         currentDetectedSign={currentDetectedSign}
+        latestWordPrediction={latestWordPrediction}
+        wordPipelineStatus={wordPipelineStatus}
+        wordLabels={wordLabels}
         targetSymbolOverride={practiceTargetOverride}
+        targetCategoryOverride={practiceCategoryOverride}
       />
     </div>
   );
 };
 
 export default App;
-

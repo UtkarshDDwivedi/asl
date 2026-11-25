@@ -1,40 +1,81 @@
 import React, { useRef, useEffect, useState, useCallback } from 'react';
-import { Camera, CameraOff, Sparkles, RefreshCw, Eye, EyeOff } from 'lucide-react';
+import {
+  Camera,
+  CameraOff,
+  RefreshCw,
+  Eye,
+  EyeOff,
+  Sparkles,
+  Loader2,
+  Check,
+} from 'lucide-react';
 import { mediaPipeService } from '../services/mediaPipeService';
 import { classifyHandGesture } from '../services/aslRecognizer';
-import { RecognitionResult } from '../types';
+import { AslWordsEngine, drawHolisticFrame } from '../services/aslWordsService';
+import type { Frame } from '../ml/landmarks';
+import type { SignLabel } from '../ml/meta';
+import type {
+  FramingStatus,
+  RecognitionMode,
+  RecognitionResult,
+  WordPipelineStatus,
+  WordPredictionEvent,
+} from '../types';
 
 interface CameraViewProps {
+  mode: RecognitionMode;
   onSignDetected: (result: RecognitionResult) => void;
+  onWordPrediction: (event: WordPredictionEvent) => void;
+  onWordPipelineStatus: (status: WordPipelineStatus) => void;
+  onWordLabelsLoaded: (labels: SignLabel[]) => void;
   onFpsUpdate: (fps: number) => void;
   onModelLoaded: (ready: boolean) => void;
-  holdProgress: number; // 0 to 1
+  holdProgress: number;
   currentHoldingSign: string | null;
+  wordPipelineStatus: WordPipelineStatus;
+  latestWordPrediction: WordPredictionEvent | null;
 }
 
+const FRAMING_HINT: Record<FramingStatus, string | null> = {
+  ok: null,
+  nothing: 'Step into camera view with hands and shoulders visible',
+  'no-hands': 'Raise your hands to begin signing',
+  partial: 'Step back slightly so both shoulders are visible',
+  crowded: 'Multiple people detected — keep 1 signer in frame',
+};
+
 export const CameraView: React.FC<CameraViewProps> = ({
+  mode,
   onSignDetected,
+  onWordPrediction,
+  onWordPipelineStatus,
+  onWordLabelsLoaded,
   onFpsUpdate,
   onModelLoaded,
   holdProgress,
   currentHoldingSign,
+  wordPipelineStatus,
+  latestWordPrediction,
 }) => {
   const videoRef = useRef<HTMLVideoElement | null>(null);
   const canvasRef = useRef<HTMLCanvasElement | null>(null);
   const animationFrameRef = useRef<number | null>(null);
+  const holisticFrameRef = useRef<Frame | null>(null);
+  const engineRef = useRef<AslWordsEngine | null>(null);
 
   const [isCameraActive, setIsCameraActive] = useState<boolean>(true);
   const [showLandmarks, setShowLandmarks] = useState<boolean>(true);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [facingMode, setFacingMode] = useState<'user' | 'environment'>('user');
   const [activeSign, setActiveSign] = useState<RecognitionResult | null>(null);
+  const [framingStatus, setFramingStatus] = useState<FramingStatus>('nothing');
 
-  // FPS tracking
   const frameCountRef = useRef<number>(0);
   const lastFpsTimeRef = useRef<number>(performance.now());
 
-  // Initialize MediaPipe model
+  // Initialize HandLandmarker when in fingerspelling mode
   useEffect(() => {
+    if (mode !== 'fingerspell') return;
     let isMounted = true;
     mediaPipeService
       .init()
@@ -44,7 +85,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
       .catch((err) => {
         console.error('Failed to initialize MediaPipe:', err);
         if (isMounted) {
-          setErrorMessage('Failed to load MediaPipe model. Please check internet connection.');
+          setErrorMessage('Failed to load MediaPipe hand model.');
           onModelLoaded(false);
         }
       });
@@ -52,7 +93,69 @@ export const CameraView: React.FC<CameraViewProps> = ({
     return () => {
       isMounted = false;
     };
-  }, [onModelLoaded]);
+  }, [mode, onModelLoaded]);
+
+  // Initialize 250-Word ASL Holistic + ONNX Engine when in asl-words mode
+  useEffect(() => {
+    if (mode !== 'asl-words' || !isCameraActive) {
+      engineRef.current?.dispose();
+      engineRef.current = null;
+      holisticFrameRef.current = null;
+      return;
+    }
+
+    const video = videoRef.current;
+    if (!video) return;
+
+    let cancelled = false;
+    setErrorMessage(null);
+    onWordPipelineStatus('loading');
+
+    const engine = new AslWordsEngine();
+    engineRef.current = engine;
+
+    engine.start(video, {
+      onReady: (_meta, labels) => {
+        if (cancelled) return;
+        onWordLabelsLoaded(labels);
+        onWordPipelineStatus('ready');
+      },
+      onError: (message) => {
+        if (cancelled) return;
+        setErrorMessage(`250-Word ASL Engine: ${message}`);
+        onWordPipelineStatus('error');
+      },
+      onFramingStatus: (status) => {
+        if (!cancelled) setFramingStatus(status);
+      },
+      onSigningStart: () => {
+        if (!cancelled) onWordPipelineStatus('signing');
+      },
+      onPrediction: (event) => {
+        if (cancelled) return;
+        onWordPipelineStatus('ready');
+        onWordPrediction(event);
+      },
+      onFrameLandmarks: (frame) => {
+        if (!cancelled) holisticFrameRef.current = frame;
+      },
+    });
+
+    return () => {
+      cancelled = true;
+      engine.dispose();
+      if (engineRef.current === engine) {
+        engineRef.current = null;
+      }
+      holisticFrameRef.current = null;
+    };
+  }, [
+    mode,
+    isCameraActive,
+    onWordLabelsLoaded,
+    onWordPipelineStatus,
+    onWordPrediction,
+  ]);
 
   // Start webcam stream
   const startCamera = useCallback(async () => {
@@ -65,7 +168,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
       const stream = await navigator.mediaDevices.getUserMedia({
         video: {
-          facingMode: facingMode,
+          facingMode,
           width: { ideal: 1280 },
           height: { ideal: 720 },
         },
@@ -81,13 +184,13 @@ export const CameraView: React.FC<CameraViewProps> = ({
       }
     } catch (err: unknown) {
       console.error('Camera access error:', err);
-      const msg = err instanceof Error ? err.message : 'Camera permission denied or camera not found.';
+      const msg =
+        err instanceof Error ? err.message : 'Camera permission denied or camera not found.';
       setErrorMessage(msg);
       setIsCameraActive(false);
     }
   }, [facingMode]);
 
-  // Stop camera stream
   const stopCamera = useCallback(() => {
     if (videoRef.current && videoRef.current.srcObject) {
       const stream = videoRef.current.srcObject as MediaStream;
@@ -102,7 +205,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
     return () => stopCamera();
   }, [startCamera, stopCamera]);
 
-  // Main Detection & Render Loop
+  // Main Render & Detection Loop
   const renderLoop = useCallback(() => {
     const video = videoRef.current;
     const canvas = canvasRef.current;
@@ -110,7 +213,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
     if (video && canvas && video.readyState >= 2) {
       const ctx = canvas.getContext('2d');
       if (ctx) {
-        // Match canvas dimensions to video
         if (canvas.width !== video.videoWidth || canvas.height !== video.videoHeight) {
           canvas.width = video.videoWidth || 640;
           canvas.height = video.videoHeight || 480;
@@ -119,37 +221,37 @@ export const CameraView: React.FC<CameraViewProps> = ({
         const width = canvas.width;
         const height = canvas.height;
 
-        // Draw camera frame mirrored for natural webcam interaction
+        // Draw mirrored camera frame
         ctx.save();
         ctx.scale(-1, 1);
         ctx.drawImage(video, -width, 0, width, height);
         ctx.restore();
 
-        // Perform landmark detection
         const now = performance.now();
-        const results = mediaPipeService.detectForVideo(video, now);
 
-        if (results && results.landmarks && results.landmarks.length > 0) {
-          const firstHandLandmarks = results.landmarks[0];
-
-          // Draw skeleton overlay if toggled
-          if (showLandmarks) {
-            mediaPipeService.drawLandmarks(ctx, firstHandLandmarks, width, height, true);
+        if (mode === 'fingerspell') {
+          const results = mediaPipeService.detectForVideo(video, now);
+          if (results && results.landmarks && results.landmarks.length > 0) {
+            const firstHandLandmarks = results.landmarks[0];
+            if (showLandmarks) {
+              mediaPipeService.drawLandmarks(ctx, firstHandLandmarks, width, height, true);
+            }
+            const recognition = classifyHandGesture(firstHandLandmarks);
+            if (results.handednesses && results.handednesses[0]?.[0]?.categoryName) {
+              recognition.handedness = results.handednesses[0][0].categoryName as 'Left' | 'Right';
+            }
+            setActiveSign(recognition);
+            onSignDetected(recognition);
+          } else {
+            setActiveSign(null);
           }
-
-          // Classify gesture
-          const recognition = classifyHandGesture(firstHandLandmarks);
-          if (results.handednesses && results.handednesses[0]?.[0]?.categoryName) {
-            recognition.handedness = results.handednesses[0][0].categoryName as 'Left' | 'Right';
-          }
-
-          setActiveSign(recognition);
-          onSignDetected(recognition);
         } else {
-          setActiveSign(null);
+          // 250-Word ASL mode: draw latest Holistic landmarks produced by worker
+          if (showLandmarks && holisticFrameRef.current) {
+            drawHolisticFrame(ctx, holisticFrameRef.current, width, height, true);
+          }
         }
 
-        // FPS calculation
         frameCountRef.current++;
         if (now - lastFpsTimeRef.current >= 1000) {
           const fps = Math.round((frameCountRef.current * 1000) / (now - lastFpsTimeRef.current));
@@ -161,7 +263,7 @@ export const CameraView: React.FC<CameraViewProps> = ({
     }
 
     animationFrameRef.current = requestAnimationFrame(renderLoop);
-  }, [showLandmarks, onSignDetected, onFpsUpdate]);
+  }, [mode, showLandmarks, onSignDetected, onFpsUpdate]);
 
   useEffect(() => {
     if (isCameraActive) {
@@ -174,24 +276,16 @@ export const CameraView: React.FC<CameraViewProps> = ({
     };
   }, [isCameraActive, renderLoop]);
 
+  const framingHint = mode === 'asl-words' ? FRAMING_HINT[framingStatus] : null;
+  const topWord = latestWordPrediction?.top[0];
+
   return (
     <div className="relative w-full h-full flex flex-col bg-slate-900 rounded-3xl overflow-hidden border border-slate-800 shadow-2xl shadow-indigo-950/20">
-      {/* Hidden source video */}
-      <video
-        ref={videoRef}
-        className="hidden"
-        playsInline
-        muted
-        autoPlay
-      />
+      <video ref={videoRef} className="hidden" playsInline muted autoPlay />
 
-      {/* Main Display Canvas */}
       <div className="relative flex-1 w-full bg-slate-950 flex items-center justify-center overflow-hidden">
         {isCameraActive ? (
-          <canvas
-            ref={canvasRef}
-            className="w-full h-full object-cover"
-          />
+          <canvas ref={canvasRef} className="w-full h-full object-cover" />
         ) : (
           <div className="flex flex-col items-center justify-center p-8 text-center text-slate-400">
             <CameraOff className="w-16 h-16 text-slate-600 mb-4 animate-bounce" />
@@ -208,12 +302,11 @@ export const CameraView: React.FC<CameraViewProps> = ({
           </div>
         )}
 
-        {/* Live Detected Gesture Overlay Badge */}
-        {isCameraActive && activeSign && activeSign.sign !== '...' && (
+        {/* Fingerspelling Live Detected Gesture Overlay Badge */}
+        {mode === 'fingerspell' && isCameraActive && activeSign && activeSign.sign !== '...' && (
           <div className="absolute top-4 left-4 z-20 flex items-center gap-3 bg-slate-900/90 backdrop-blur-md px-4 py-2.5 rounded-2xl border border-indigo-500/30 shadow-xl">
             <div className="relative flex items-center justify-center w-12 h-12 rounded-xl bg-indigo-600/30 border border-indigo-500/50">
               <span className="text-2xl font-black text-white">{activeSign.sign}</span>
-              {/* Circular Hold Progress */}
               {holdProgress > 0 && currentHoldingSign === activeSign.sign && (
                 <svg className="absolute -inset-1 w-14 h-14 -rotate-90 pointer-events-none">
                   <circle
@@ -247,9 +340,68 @@ export const CameraView: React.FC<CameraViewProps> = ({
           </div>
         )}
 
+        {/* 250-Word ASL Live Status & Prediction Overlay */}
+        {mode === 'asl-words' && isCameraActive && (
+          <div className="absolute top-4 left-4 z-20 flex flex-col gap-2 max-w-xs">
+            <div className="flex items-center gap-3 bg-slate-900/90 backdrop-blur-md px-4 py-2.5 rounded-2xl border border-cyan-500/30 shadow-xl">
+              <div
+                className={`flex items-center justify-center w-11 h-11 rounded-xl border ${
+                  wordPipelineStatus === 'loading'
+                    ? 'bg-amber-500/15 border-amber-500/40 text-amber-300'
+                    : wordPipelineStatus === 'signing'
+                      ? 'bg-cyan-500/20 border-cyan-400/60 text-cyan-300 animate-pulse'
+                      : 'bg-indigo-600/30 border-indigo-500/50 text-white'
+                }`}
+              >
+                {wordPipelineStatus === 'loading' ? (
+                  <Loader2 className="w-5 h-5 animate-spin" />
+                ) : (
+                  <Sparkles className="w-5 h-5" />
+                )}
+              </div>
+
+              <div className="min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] uppercase font-bold tracking-wider text-cyan-400">
+                    {wordPipelineStatus === 'loading'
+                      ? 'Loading AI'
+                      : wordPipelineStatus === 'signing'
+                        ? 'Recording Sign...'
+                        : latestWordPrediction?.kind === 'recognized'
+                          ? 'Recognized'
+                          : latestWordPrediction?.kind === 'not-sure'
+                            ? 'Not Sure'
+                            : 'Ready'}
+                  </span>
+                  {topWord && wordPipelineStatus !== 'signing' && (
+                    <span className="text-[11px] text-slate-400 font-mono">
+                      {Math.round(topWord.probability * 100)}%
+                    </span>
+                  )}
+                </div>
+                <p className="text-sm text-white font-bold truncate">
+                  {wordPipelineStatus === 'loading'
+                    ? 'Initializing Holistic + ONNX'
+                    : wordPipelineStatus === 'signing'
+                      ? 'Pause briefly when done'
+                      : topWord
+                        ? topWord.label.toUpperCase()
+                        : 'Sign a word to translate'}
+                </p>
+              </div>
+            </div>
+
+            {framingHint && wordPipelineStatus !== 'loading' && (
+              <div className="bg-slate-900/85 backdrop-blur-md border border-amber-500/30 text-amber-200 text-[11px] px-3 py-1.5 rounded-xl shadow-lg">
+                {framingHint}
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Error Notification */}
         {errorMessage && (
-          <div className="absolute top-4 right-4 max-w-md bg-red-950/90 border border-red-500/50 text-red-200 text-xs p-3 rounded-xl backdrop-blur-md shadow-xl">
+          <div className="absolute top-4 right-4 z-30 max-w-md bg-red-950/90 border border-red-500/50 text-red-200 text-xs p-3 rounded-xl backdrop-blur-md shadow-xl">
             <p className="font-semibold">Notice:</p>
             <p className="mt-0.5">{errorMessage}</p>
           </div>
@@ -257,7 +409,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
 
         {/* Quick Floating Camera Toolbar */}
         <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 flex items-center gap-2 bg-slate-900/90 backdrop-blur-md px-3 py-1.5 rounded-2xl border border-slate-700/80 shadow-2xl">
-          {/* Toggle Camera */}
           <button
             onClick={isCameraActive ? stopCamera : startCamera}
             title={isCameraActive ? 'Turn off camera' : 'Turn on camera'}
@@ -270,7 +421,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
             {isCameraActive ? <Camera className="w-4 h-4" /> : <CameraOff className="w-4 h-4" />}
           </button>
 
-          {/* Toggle Landmark Mesh Overlay */}
           <button
             onClick={() => setShowLandmarks(!showLandmarks)}
             title={showLandmarks ? 'Hide landmark mesh' : 'Show landmark mesh'}
@@ -283,7 +433,6 @@ export const CameraView: React.FC<CameraViewProps> = ({
             {showLandmarks ? <Eye className="w-4 h-4" /> : <EyeOff className="w-4 h-4" />}
           </button>
 
-          {/* Switch Camera (User / Environment) */}
           <button
             onClick={() => setFacingMode((prev) => (prev === 'user' ? 'environment' : 'user'))}
             title="Flip camera"
@@ -291,9 +440,19 @@ export const CameraView: React.FC<CameraViewProps> = ({
           >
             <RefreshCw className="w-4 h-4" />
           </button>
+
+          {mode === 'asl-words' && wordPipelineStatus === 'signing' && (
+            <button
+              onClick={() => engineRef.current?.flush()}
+              title="Classify current sign immediately"
+              className="flex items-center gap-1 px-2.5 py-1.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white text-xs font-semibold transition-all"
+            >
+              <Check className="w-3.5 h-3.5" />
+              <span>Finish Sign</span>
+            </button>
+          )}
         </div>
       </div>
     </div>
   );
 };
-

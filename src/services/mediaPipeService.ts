@@ -32,8 +32,11 @@ class MediaPipeVisionService {
 
     this.isInitializing = true;
     try {
+      const base = import.meta.env.BASE_URL.endsWith('/')
+        ? import.meta.env.BASE_URL
+        : `${import.meta.env.BASE_URL}/`;
       const vision = await FilesetResolver.forVisionTasks(
-        'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.18/wasm'
+        `${base}vendor/mediapipe/wasm`
       );
 
       this.handLandmarker = await HandLandmarker.createFromOptions(vision, {
@@ -69,7 +72,7 @@ class MediaPipeVisionService {
     isMirrored = true
   ) {
     ctx.save();
-    
+
     // Connect skeleton joints
     ctx.lineWidth = 3;
     ctx.lineCap = 'round';

@@ -7,32 +7,39 @@ import {
   Check,
   Sparkles,
   Sliders,
-  CornerDownLeft,
   Space,
+  CheckCircle2,
+  AlertCircle,
 } from 'lucide-react';
 import { sounds } from '../utils/audio';
 import { getWordSuggestions } from '../utils/words';
+import type { RecognitionMode, WordPredictionEvent } from '../types';
 
 interface TranslationPanelProps {
+  mode: RecognitionMode;
   currentWord: string;
   sentence: string;
   onAddSpace: () => void;
   onBackspace: () => void;
   onClear: () => void;
   onSelectSuggestion: (word: string) => void;
+  onSelectWordCandidate: (word: string, replaceLast: boolean) => void;
+  latestWordPrediction: WordPredictionEvent | null;
   ttsEnabled: boolean;
   holdDuration: number;
   onHoldDurationChange: (val: number) => void;
 }
 
 export const TranslationPanel: React.FC<TranslationPanelProps> = ({
+  mode,
   currentWord,
   sentence,
   onAddSpace,
   onBackspace,
   onClear,
   onSelectSuggestion,
-  ttsEnabled,
+  onSelectWordCandidate,
+  latestWordPrediction,
   holdDuration,
   onHoldDurationChange,
 }) => {
@@ -40,7 +47,11 @@ export const TranslationPanel: React.FC<TranslationPanelProps> = ({
   const [showSettings, setShowSettings] = useState(false);
 
   const fullText = (sentence + (currentWord ? (sentence ? ' ' : '') + currentWord : '')).trim();
-  const suggestions = getWordSuggestions(currentWord);
+  const suggestions = mode === 'fingerspell' ? getWordSuggestions(currentWord) : [];
+  const wordCandidates =
+    mode === 'asl-words' && latestWordPrediction && latestWordPrediction.top.length > 0
+      ? latestWordPrediction.top
+      : [];
 
   const handleCopy = () => {
     if (!fullText) return;
@@ -66,21 +77,27 @@ export const TranslationPanel: React.FC<TranslationPanelProps> = ({
           </h2>
         </div>
 
-        <button
-          onClick={() => setShowSettings(!showSettings)}
-          className={`p-2 rounded-xl border text-xs transition-all flex items-center gap-1.5 ${
-            showSettings
-              ? 'bg-indigo-600/20 text-indigo-400 border-indigo-500/30'
-              : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-slate-200'
-          }`}
-        >
-          <Sliders className="w-3.5 h-3.5" />
-          <span className="hidden sm:inline">Settings</span>
-        </button>
+        {mode === 'fingerspell' ? (
+          <button
+            onClick={() => setShowSettings(!showSettings)}
+            className={`p-2 rounded-xl border text-xs transition-all flex items-center gap-1.5 ${
+              showSettings
+                ? 'bg-indigo-600/20 text-indigo-400 border-indigo-500/30'
+                : 'bg-slate-800 text-slate-400 border-slate-700 hover:text-slate-200'
+            }`}
+          >
+            <Sliders className="w-3.5 h-3.5" />
+            <span className="hidden sm:inline">Settings</span>
+          </button>
+        ) : (
+          <span className="text-[11px] font-mono text-cyan-400 bg-cyan-500/10 border border-cyan-500/20 px-2.5 py-1 rounded-full">
+            250-Word AI
+          </span>
+        )}
       </div>
 
-      {/* Settings collapsible box */}
-      {showSettings && (
+      {/* Settings collapsible box (fingerspelling) */}
+      {mode === 'fingerspell' && showSettings && (
         <div className="bg-slate-950/80 rounded-2xl p-4 border border-slate-800 text-xs space-y-3 animate-in fade-in slide-in-from-top-2">
           <div className="flex items-center justify-between">
             <span className="text-slate-300 font-medium">Hold Sensitivity ({holdDuration}ms)</span>
@@ -106,27 +123,77 @@ export const TranslationPanel: React.FC<TranslationPanelProps> = ({
       {/* Main Text Display Output Area */}
       <div className="flex-1 flex flex-col justify-end bg-slate-950/60 rounded-2xl p-5 border border-slate-800/80 min-h-[160px] overflow-y-auto">
         {sentence && (
-          <p className="text-slate-400 text-sm font-medium mb-2 leading-relaxed">
+          <p className="text-slate-200 text-lg sm:text-xl font-bold mb-2 leading-relaxed tracking-wide">
             {sentence}
           </p>
         )}
 
-        {/* Current Active Word with glowing cursor */}
+        {/* Current Active Word / Prompt */}
         <div className="flex items-center gap-1 flex-wrap">
           {currentWord ? (
             <span className="text-3xl sm:text-4xl font-black text-transparent bg-clip-text bg-gradient-to-r from-indigo-400 via-sky-300 to-cyan-400 tracking-wider">
               {currentWord}
             </span>
           ) : (
-            <span className="text-slate-600 text-lg italic">
-              {sentence ? 'Keep signing or add next word...' : 'Sign with your hand in camera view...'}
+            <span className="text-slate-500 text-sm italic">
+              {mode === 'asl-words'
+                ? sentence
+                  ? 'Perform your next ASL sign and pause briefly...'
+                  : 'Perform an ASL sign in view (shoulders + hands visible)...'
+                : sentence
+                  ? 'Keep signing or add next word...'
+                  : 'Sign with your hand in camera view...'}
             </span>
           )}
-          <span className="w-2.5 h-8 bg-indigo-500 rounded animate-pulse" />
+          <span className="w-2.5 h-7 bg-indigo-500 rounded animate-pulse" />
         </div>
       </div>
 
-      {/* Autocomplete Suggestions Chips */}
+      {/* 250-Word ASL Top-3 Candidates */}
+      {mode === 'asl-words' && latestWordPrediction && latestWordPrediction.kind !== 'discarded' && (
+        <div className="space-y-2">
+          <div className="flex items-center justify-between text-[11px]">
+            <div className="flex items-center gap-1.5 text-slate-400">
+              {latestWordPrediction.kind === 'recognized' ? (
+                <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+              ) : (
+                <AlertCircle className="w-3.5 h-3.5 text-amber-400" />
+              )}
+              <span>
+                {latestWordPrediction.kind === 'recognized'
+                  ? 'Top Predictions (click to replace):'
+                  : latestWordPrediction.reason === 'partial'
+                    ? 'Shoulders out of frame — tap if one matches:'
+                    : 'Low confidence — tap if one matches:'}
+              </span>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap gap-2">
+            {wordCandidates.map((cand, idx) => {
+              const replaceLast = latestWordPrediction.kind === 'recognized' && Boolean(sentence);
+              return (
+                <button
+                  key={`${cand.index}-${cand.label}`}
+                  onClick={() => onSelectWordCandidate(cand.label.toUpperCase(), replaceLast)}
+                  className={`px-3 py-1.5 rounded-xl border text-xs font-semibold tracking-wide transition-all flex items-center gap-1.5 ${
+                    idx === 0 && latestWordPrediction.kind === 'recognized'
+                      ? 'bg-emerald-500/15 hover:bg-emerald-500/25 text-emerald-300 border-emerald-500/30'
+                      : 'bg-indigo-500/10 hover:bg-indigo-500/20 text-indigo-300 border-indigo-500/30'
+                  }`}
+                >
+                  <span>{cand.label}</span>
+                  <span className="text-[10px] font-mono opacity-75">
+                    {Math.round(cand.probability * 100)}%
+                  </span>
+                </button>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* Autocomplete Suggestions Chips (fingerspelling) */}
       {suggestions.length > 0 && (
         <div className="space-y-1.5">
           <div className="flex items-center gap-1.5 text-[11px] text-slate-400">
@@ -149,7 +216,6 @@ export const TranslationPanel: React.FC<TranslationPanelProps> = ({
 
       {/* Control Buttons (Space, Backspace, Clear, Speak, Copy) */}
       <div className="grid grid-cols-5 gap-2 pt-2 border-t border-slate-800">
-        {/* Space */}
         <button
           onClick={onAddSpace}
           title="Add Space between words"
@@ -159,16 +225,14 @@ export const TranslationPanel: React.FC<TranslationPanelProps> = ({
           <span>Space</span>
         </button>
 
-        {/* Backspace */}
         <button
           onClick={onBackspace}
-          title="Delete last letter"
+          title="Delete last letter or word"
           className="py-3 px-3 rounded-2xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold flex items-center justify-center border border-slate-700 transition-all active:scale-95"
         >
           <Delete className="w-4 h-4 text-amber-400" />
         </button>
 
-        {/* Speak */}
         <button
           onClick={handleSpeak}
           disabled={!fullText}
@@ -182,7 +246,6 @@ export const TranslationPanel: React.FC<TranslationPanelProps> = ({
           <Volume2 className="w-4 h-4" />
         </button>
 
-        {/* Copy / Clear */}
         <div className="flex gap-2">
           <button
             onClick={handleCopy}
@@ -209,4 +272,3 @@ export const TranslationPanel: React.FC<TranslationPanelProps> = ({
     </div>
   );
 };
-
